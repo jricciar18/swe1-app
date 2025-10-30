@@ -1,0 +1,149 @@
+name: Django CI
+
+on:
+  push:
+    branches: [ "**" ]
+  pull_request:
+    branches: [ "**" ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: "3.12"
+  DJANGO_SETTINGS_MODULE: "mysite.settings"
+
+jobs:
+  lint:
+    name: Lint and Format
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          # Ensure tools present even if not in requirements
+          pip install black==24.8.0 flake8==7.1.1
+
+      - name: Check code format (black)
+        run: |
+          black --version
+          black --check .
+
+      - name: Lint (flake8)
+        run: |
+          flake8 .
+
+  test:
+    name: Tests and Coverage
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install coverage==7.6.1 coveralls==4.0.1
+
+      - name: Show Django version
+        run: python -c "import django, sys; print('Django', django.get_version()); sys.exit(0)"
+
+      - name: Run migrations
+        run: |
+          python manage.py migrate --noinput
+
+      - name: Run tests with coverage
+        env:
+          DJANGO_SETTINGS_MODULE: ${{ env.DJANGO_SETTINGS_MODULE }}
+        run: |
+          coverage run manage.py test
+          coverage report -m
+          coverage xml -i
+
+      - name: Upload coverage to Coveralls
+        if: always()
+        uses: coverallsapp/github-action@v2
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          file: coverage.xml
+          parallel: false
+          flag-name: unit-tests
+
+  deploy:
+    name: Deploy to Elastic Beanstalk
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.test.result == 'success'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install AWS CLI
+        run: |
+          pip install awscli==1.34.18
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Create application bundle
+        run: |
+          echo "Zipping source..."
+          zip -qr app.zip . -x ".git/*" "**/__pycache__/*" ".venv/*" "env/*" "*.zip" "db.sqlite3"
+
+      - name: Upload bundle to S3
+        env:
+          S3_BUCKET: ${{ secrets.EB_S3_BUCKET }}
+        run: |
+          VERSION_LABEL=${{ github.run_id }}-${{ github.run_number }}-${{ github.sha }}
+          echo "$VERSION_LABEL" > version_label.txt
+          aws s3 cp app.zip s3://$S3_BUCKET/app-$VERSION_LABEL.zip
+
+      - name: Create EB application version
+        env:
+          EB_APP_NAME: ${{ secrets.EB_APP_NAME }}
+          S3_BUCKET: ${{ secrets.EB_S3_BUCKET }}
+        run: |
+          VERSION_LABEL=$(cat version_label.txt)
+          aws elasticbeanstalk create-application-version \
+            --application-name "$EB_APP_NAME" \
+            --version-label "$VERSION_LABEL" \
+            --source-bundle S3Bucket=$S3_BUCKET,S3Key=app-$VERSION_LABEL.zip
+
+      - name: Deploy to EB environment
+        env:
+          EB_APP_NAME: ${{ secrets.EB_APP_NAME }}
+          EB_ENV_NAME: ${{ secrets.EB_ENV_NAME }}
+        run: |
+          VERSION_LABEL=$(cat version_label.txt)
+          aws elasticbeanstalk update-environment \
+            --application-name "$EB_APP_NAME" \
+            --environment-name "$EB_ENV_NAME" \
+            --version-label "$VERSION_LABEL"
+
+
