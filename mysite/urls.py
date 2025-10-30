@@ -22,7 +22,10 @@ from django.http import HttpResponse
 
 def home(request):
     return HttpResponse(
-        "Welcome to Django Tutorial! Visit <a href='/polls/'>polls</a> or <a href='/admin/'>admin</a>"
+        (
+            "Welcome to Django Tutorial! Visit "
+            "<a href='/polls/'>polls</a> or <a href='/admin/'>admin</a>"
+        )
     )
 
 
